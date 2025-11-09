@@ -1,0 +1,20 @@
+{
+  "name": "postman-builder",
+  "version": "1.0.0",
+  "description": "* Import collection with specific import settings (e.g. Tag) * Manually create authentication folder, auth call, and script * Setup environment variable file with appropriate/consistent variables * Set parent collection to have all subfolders use {{accessToken}} * Manually updating every endpoint from OAuth2 to Inherit from Parent",
+  "main": "index.js",
+  "scripts": {
+    "rebuild": "node build-postman.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "curl-to-postmanv2": "^1.8.3",
+    "dotenv": "^17.2.3",
+    "node-fetch": "^2.7.0",
+    "openapi-to-postmanv2": "^5.3.3",
+    "postman-collection": "^5.2.0"
+  }
+}

@@ -1,0 +1,209 @@
+// build-postman.js — Create-only. Always POST a new dated collection.
+// Node 16+ (CommonJS)
+
+require('dotenv').config({ path: './env.local' });
+
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+const fetch = require('node-fetch');           // v2 (CJS)
+const Converter = require('openapi-to-postmanv2');
+
+// -------------------- CONFIG --------------------
+const SPEC_URL       = process.env.SPEC_URL || './openapi.json';
+const OUTPUT_FILE    = process.env.OUTPUT_FILE || './Polly.postman_collection.json';
+const WORKSPACE_ID   = process.env.POSTMAN_WORKSPACE_ID || 'ca4b69c0-6e8f-4566-8561-075f5d7d6a7b';
+
+// Stage env naming + base URL
+const ENV_NAME      = '🟢 STAGE - Default';
+const ENV_BASE_URL  = 'https://api.stage.polly.io';
+
+// Auth scripts
+const AUTH_TEST_SCRIPT =
+  'var jsonData = pm.response.json();\n' +
+  'pm.environment.set("accessToken", jsonData.access_token);\n' +
+  'pm.environment.set("refreshToken", jsonData.refresh_token);\n';
+
+const COLLECTION_PREREQ_SCRIPT =
+  "var t = pm.environment.get('accessToken');\n" +
+  "if (t) { pm.request.headers.upsert({ key: 'Authorization', value: 'Bearer ' + t }); }\n";
+
+// ----------------- Helpers ----------------
+const httpsAgentNoKeepAlive = new https.Agent({ keepAlive: false, maxSockets: 1 });
+
+async function postmanFetch(url, opts, retries = 3) {
+  try {
+    const res = await fetch(url, { agent: httpsAgentNoKeepAlive, ...opts });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(res.status + ' ' + text);
+    }
+    return res;
+  } catch (e) {
+    if (retries > 0) {
+      await new Promise(r => setTimeout(r, 700 * (4 - retries))); // simple backoff
+      return postmanFetch(url, opts, retries - 1);
+    }
+    throw e;
+  }
+}
+
+async function loadSpecText(src) {
+  if (/^https?:\/\//i.test(src)) {
+    const res = await fetch(src);
+    if (!res.ok) throw new Error('Failed to fetch spec: ' + res.status + ' ' + res.statusText);
+    return await res.text();
+  }
+  const abs = path.resolve(src);
+  if (!fs.existsSync(abs)) throw new Error('Spec file not found at: ' + abs);
+  return fs.readFileSync(abs, 'utf8');
+}
+
+function addAuthFolder(collection) {
+  const authItem = {
+    name: 'Get Access Token',
+    event: [{ listen: 'test', script: { type: 'text/javascript', exec: AUTH_TEST_SCRIPT.split('\n') } }],
+    request: {
+      method: 'POST',
+      header: [{ key: 'Content-Type', value: 'application/x-www-form-urlencoded' }],
+      url: '{{baseUrl}}/api/v2/auth/token/',
+      body: {
+        mode: 'urlencoded',
+        urlencoded: [
+          { key: 'username',      value: '{{username}}',      type: 'text' },
+          { key: 'password',      value: '{{password}}',      type: 'text' },
+          { key: 'grant_type',    value: 'password',          type: 'text' },
+          { key: 'client_id',     value: '{{clientId}}',      type: 'text' },
+          { key: 'client_secret', value: '{{clientSecret}}',  type: 'text' }
+        ]
+      }
+    }
+  };
+  const folder = { name: 'Auth', item: [authItem] };
+  collection.item = Array.isArray(collection.item) ? collection.item : [];
+  collection.item.unshift(folder);
+}
+
+function setCollectionBearerAuth(collection) {
+  collection.auth = {
+    type: 'bearer',
+    bearer: [{ key: 'token', value: '{{accessToken}}', type: 'string' }]
+  };
+}
+
+function attachCollectionPrerequest(collection) {
+  collection.event = Array.isArray(collection.event) ? collection.event : [];
+  collection.event.push({
+    listen: 'prerequest',
+    script: { type: 'text/javascript', exec: COLLECTION_PREREQ_SCRIPT.split('\n') }
+  });
+}
+
+function stripAuthAndAuthHeaders(node) {
+  if (!node) return;
+  if (node.auth) delete node.auth;
+  if (node.request && Array.isArray(node.request.header)) {
+    node.request.header = node.request.header.filter(function (h) {
+      return !(h && typeof h.key === 'string' && h.key.toLowerCase() === 'authorization');
+    });
+  }
+  const kids = node.item;
+  if (Array.isArray(kids)) kids.forEach(stripAuthAndAuthHeaders);
+}
+
+function removeBaseUrlVariable(collection) {
+  if (!Array.isArray(collection.variable)) return;
+  collection.variable = collection.variable.filter(v => v && v.key !== 'baseUrl');
+}
+
+// -------------------- MAIN ----------------------
+(async function main() {
+  // 1) Load & convert spec
+  const specRaw = await loadSpecText(SPEC_URL);
+  const convertOpts = {
+    requestNameSource: 'fallback',
+    indentCharacter: ' ',
+    folderStrategy: 'Tags',
+    requestParametersResolution: 'Example'
+    // includeDeprecated: true,
+  };
+
+  const result = await new Promise((resolve, reject) => {
+    Converter.convert({ type: 'string', data: specRaw }, convertOpts, (err, res) => {
+      if (err) return reject(err);
+      if (!res || !res.result) return reject(new Error((res && res.reason) || 'OpenAPI conversion failed'));
+      resolve(res);
+    });
+  });
+
+  const collection = result.output[0].data;
+
+  // 2) Fix auth model + Auth folder
+  addAuthFolder(collection);
+  setCollectionBearerAuth(collection);
+  attachCollectionPrerequest(collection);
+  if (Array.isArray(collection.item)) {
+    collection.item.forEach(stripAuthAndAuthHeaders);
+  }
+  removeBaseUrlVariable(collection);
+
+  // 3) Write collection file (with dated name)
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  collection.info = collection.info || {};
+  collection.info.name = 'Polly API ' + today;
+
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(collection, null, 2));
+  console.log('Wrote ' + OUTPUT_FILE);
+
+  // 4) Upload collection (CREATE only)
+  if (!process.env.POSTMAN_API_KEY) {
+    console.warn('⚠️  POSTMAN_API_KEY not set. Skipping upload.');
+  } else {
+    const wrapped = { collection: JSON.parse(fs.readFileSync(OUTPUT_FILE, 'utf8')) };
+    const postRes = await postmanFetch('https://api.getpostman.com/collections?workspace=' + WORKSPACE_ID, {
+      method: 'POST',
+      headers: {
+        'X-Api-Key': process.env.POSTMAN_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(wrapped)
+    });
+    console.log('✅ Collection created:', await postRes.text());
+  }
+
+  // 5) Create & upload Stage environment ONCE (if file not present yet)
+  const envPath = './Polly.postman_environment.json';
+  if (fs.existsSync(envPath)) {
+    console.log('ℹ️  Environment file already exists — skipping creation/upload.');
+    return;
+  }
+
+  const envObj = {
+    name: ENV_NAME,
+    values: [
+      { key: 'baseUrl', value: ENV_BASE_URL, type: 'default' },
+      { key: 'username', value: '', type: 'default' },
+      { key: 'password', value: '', type: 'default' },
+      { key: 'clientId', value: '', type: 'default' },
+      { key: 'clientSecret', value: '', type: 'default' }
+    ]
+  };
+
+  const wrappedEnv = { environment: envObj };
+  fs.writeFileSync(envPath, JSON.stringify(wrappedEnv, null, 2));
+
+  if (process.env.POSTMAN_API_KEY) {
+    const envRes = await postmanFetch('https://api.getpostman.com/environments?workspace=' + WORKSPACE_ID, {
+      method: 'POST',
+      headers: {
+        'X-Api-Key': process.env.POSTMAN_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(wrappedEnv)
+    });
+    console.log('✅ Environment uploaded to Postman:', await envRes.text());
+  }
+})().catch(e => {
+  console.error('Upload error:', e.message);
+  process.exit(1);
+});
