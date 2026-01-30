@@ -130,13 +130,21 @@ function attachCollectionPrerequest(collection) {
 function stripAuthAndAuthHeaders(node) {
   if (!node) return;
 
-  const isRequest = !!node.request;
+  const isRequestItem = !!(node && typeof node === 'object' && node.request);
 
-  if (isRequest) {
-    // For individual requests → show "Inherit auth from parent"
-    node.auth = { type: 'inherit' };
+  if (isRequestItem) {
+    // For individual requests → force "Inherit auth from parent"
+    // NOTE: openapi-to-postmanv2 writes auth under `request.auth` (not `item.auth`)
+    // Postman API requires `null` (not `{ type: 'inherit' }`) to inherit from parent
+    if (node.request && typeof node.request === 'object') {
+      node.request.auth = null;
+    }
+    // If any legacy/item-level auth exists, remove it to avoid overriding request auth.
+    // (The Postman schema primarily uses `item.request.auth` for request items.)
+    if (node.auth) delete node.auth;
+
     // Remove any hardcoded Authorization header
-    if (Array.isArray(node.request.header)) {
+    if (node.request && Array.isArray(node.request.header)) {
       node.request.header = node.request.header.filter(
         h =>
           !(
