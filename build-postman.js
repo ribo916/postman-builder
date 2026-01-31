@@ -38,10 +38,6 @@ const AUTH_TEST_SCRIPT =
   'pm.environment.set("accessToken", jsonData.access_token);\n' +
   'pm.environment.set("refreshToken", jsonData.refresh_token);\n';
 
-const COLLECTION_PREREQ_SCRIPT =
-  "var t = pm.environment.get('accessToken');\n" +
-  "if (t) { pm.request.headers.upsert({ key: 'Authorization', value: 'Bearer ' + t }); }\n";
-
 // ============================================================================
 // Networking Helpers
 // ============================================================================
@@ -111,57 +107,69 @@ function addAuthFolder(collection) {
   collection.item.unshift(folder);
 }
 
-function setCollectionBearerAuth(collection) {
-  collection.auth = {
-    type: 'bearer',
-    bearer: [{ key: 'token', value: '{{accessToken}}', type: 'string' }]
-  };
-}
-
-function attachCollectionPrerequest(collection) {
-  collection.event = Array.isArray(collection.event) ? collection.event : [];
-  collection.event.push({
-    listen: 'prerequest',
-    script: { type: 'text/javascript', exec: COLLECTION_PREREQ_SCRIPT.split('\n') }
-  });
-}
-
-// Recursively clean auth from requests/folders and make requests inherit from parent
-function stripAuthAndAuthHeaders(node) {
+// Remove hardcoded Authorization headers so each request's auth config (e.g. OAuth2 from Swagger) drives the header.
+// Leaves request.auth and item.auth unchanged so each endpoint keeps its OAuth2 from the import.
+function stripAuthHeadersOnly(node) {
   if (!node) return;
 
   const isRequestItem = !!(node && typeof node === 'object' && node.request);
 
-  if (isRequestItem) {
-    // For individual requests → force "Inherit auth from parent"
-    // NOTE: openapi-to-postmanv2 writes auth under `request.auth` (not `item.auth`)
-    // Postman API requires `null` (not `{ type: 'inherit' }`) to inherit from parent
-    if (node.request && typeof node.request === 'object') {
-      node.request.auth = null;
-    }
-    // If any legacy/item-level auth exists, remove it to avoid overriding request auth.
-    // (The Postman schema primarily uses `item.request.auth` for request items.)
-    if (node.auth) delete node.auth;
-
-    // Remove any hardcoded Authorization header
-    if (node.request && Array.isArray(node.request.header)) {
-      node.request.header = node.request.header.filter(
-        h =>
-          !(
-            h &&
-            typeof h.key === 'string' &&
-            h.key.toLowerCase() === 'authorization'
-          )
-      );
-    }
-  } else {
-    // For folders → remove auth completely (folders can’t have "inherit")
-    delete node.auth;
+  if (isRequestItem && node.request && Array.isArray(node.request.header)) {
+    node.request.header = node.request.header.filter(
+      h =>
+        !(
+          h &&
+          typeof h.key === 'string' &&
+          h.key.toLowerCase() === 'authorization'
+        )
+    );
   }
 
-  // Recurse through nested folders/items
   if (Array.isArray(node.item)) {
-    node.item.forEach(stripAuthAndAuthHeaders);
+    node.item.forEach(stripAuthHeadersOnly);
+  }
+}
+
+const ACCESS_TOKEN_VARIABLE = '{{accessToken}}';
+
+function setAccessTokenVariableOnAuth(auth) {
+  if (!auth || typeof auth !== 'object') return;
+  if (auth.type === 'oauth2' && Array.isArray(auth.oauth2)) {
+    const entry = auth.oauth2.find(e => e && e.key === 'accessToken');
+    if (entry) {
+      entry.value = ACCESS_TOKEN_VARIABLE;
+    } else {
+      auth.oauth2.push({
+        key: 'accessToken',
+        value: ACCESS_TOKEN_VARIABLE,
+        type: 'string'
+      });
+    }
+  }
+  if (auth.type === 'bearer' && Array.isArray(auth.bearer)) {
+    const entry = auth.bearer.find(e => e && e.key === 'token');
+    if (entry) {
+      entry.value = ACCESS_TOKEN_VARIABLE;
+    } else {
+      auth.bearer.push({
+        key: 'token',
+        value: ACCESS_TOKEN_VARIABLE,
+        type: 'string'
+      });
+    }
+  }
+}
+
+function setAccessTokenVariableOnRequests(node) {
+  if (!node) return;
+  if (node.request && typeof node.request === 'object' && node.request.auth) {
+    setAccessTokenVariableOnAuth(node.request.auth);
+  }
+  if (node.auth) {
+    setAccessTokenVariableOnAuth(node.auth);
+  }
+  if (Array.isArray(node.item)) {
+    node.item.forEach(setAccessTokenVariableOnRequests);
   }
 }
 
@@ -197,10 +205,9 @@ function removeBaseUrlVariable(collection) {
 
     // 2) Post-processing
     addAuthFolder(collection);
-    setCollectionBearerAuth(collection);
-    attachCollectionPrerequest(collection);
     if (Array.isArray(collection.item)) {
-      collection.item.forEach(stripAuthAndAuthHeaders);
+      collection.item.forEach(stripAuthHeadersOnly);
+      collection.item.forEach(setAccessTokenVariableOnRequests);
     }
     removeBaseUrlVariable(collection);
 

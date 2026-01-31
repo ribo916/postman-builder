@@ -1,15 +1,14 @@
 # Polly API → Postman Builder (Create‑Only)
 
-Automates turning the Polly OpenAPI spec into a fresh, **dated** Postman collection and uploads it to your workspace. Also creates a 🟢 **STAGE - Default** environment once.
+Automates turning the Polly OpenAPI spec into a fresh, **dated** Postman collection and uploads it to your workspace.
 
 ### Why – Manual work creating a Postman collection from our OpenAPI spec
 * Import collection with specific import settings (e.g., Tag)
 * Manually create authentication folder, auth call, and test script
-* Set up environment variable file with consistent keys
-* Set parent collection to have all subfolders use `{{accessToken}}`
-* Manually update every endpoint from OAuth2 to *Inherit from Parent*
+* Set up environment variables with consistent keys
+* Add `{{accessToken}}` to each endpoint’s OAuth2 token field
 
-➡️ **This script automates all of that — one command rebuilds, names, uploads, and syncs the full collection and environment in Postman.**
+➡️ **This script automates all of that — one command rebuilds, names, and uploads the full collection to Postman.**
 
 ---
 
@@ -46,14 +45,13 @@ env.local
 
 ## 2) Script
 
-Place the final **create‑only** `build-postman.js` in this folder (the version that:
+Place the **create‑only** `build-postman.js` in this folder (the version that:
 
-* fixes auth (collection-level Bearer + pre-request header)
 * adds **Auth → Get Access Token** using `{{username}}/{{password}}/{{clientId}}/{{clientSecret}}`
-* strips per-request auth + Authorization headers
+* keeps each endpoint as OAuth2 from the Swagger import and sets `{{accessToken}}` in each endpoint’s token field
+* strips hardcoded Authorization headers so each request’s auth config drives the header
 * removes collection `baseUrl` var so Environment value is used
 * **always POSTs** a new collection named `Polly API YYYY-MM-DD`
-* creates and uploads the 🟢 **STAGE - Default** environment once (skips if file exists)
   )
 
 ---
@@ -89,7 +87,6 @@ Output:
 ```
 Wrote ./Polly.postman_collection.json
 ✅ Collection created: {...}
-✅ Environment uploaded to Postman: {...}  # only on first run
 ```
 
 What happens:
@@ -97,7 +94,6 @@ What happens:
 * Converts the OpenAPI at `SPEC_URL`
 * Generates a collection named **Polly API YYYY-MM-DD**
 * Uploads it to workspace **POSTMAN_WORKSPACE_ID**
-* Creates & uploads **🟢 STAGE - Default** environment (once)
 
 ---
 
@@ -114,15 +110,14 @@ clientId     <your_clientId>
 clientSecret <your_clientSecret>
 ```
 
-3. Run **Auth → Get Access Token** → populates `accessToken`/`refreshToken`.
-4. Send any request — the collection pre-request script injects `Authorization: Bearer {{accessToken}}` automatically.
+3. Run **Auth → Get Access Token** → populates `accessToken`/`refreshToken` in your environment.
+4. Send any request — each endpoint uses OAuth2 with `{{accessToken}}` in the token field, so Postman sends the token from your environment.
 
 ---
 
 ## 6) Maintenance
 
 * Re-run `npm run rebuild` anytime to generate a **new dated** collection from the current spec.
-* The environment file is reused; it won’t be recreated if it already exists.
 
 ---
 
